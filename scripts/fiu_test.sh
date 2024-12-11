@@ -17,17 +17,18 @@ FS_DIR=/mnt/f2fs
 #S4_MODULE=/home/ihhwang/gc_scanning/F2FS_S4/linux-6.6.52/fs/f2fs/f2fs_S4_locality.ko
 #S4_MODULE=/home/ihhwang/gc_scanning/F2FS_S4/linux-6.6.52/fs/f2fs/f2fs_entropy_v3.ko
 S4_MODULE=/home/ihhwang/gc_scanning/F2FS_S4/linux-6.6.52/fs/f2fs/f2fs_entropy_v4.ko
+H3=/home/ihhwang/gc_scanning/F2FS_S4/linux-6.6.52/fs/f2fs/f2fs_entropy_h3.ko
 ORIG_F2FS_MODULE=/home/ihhwang/linux-6.6.52/fs/f2fs/f2fs_vanilla.ko
 ##
 
 ## WORKLOADS PARAMs ##
 #BASE_SIZE=465
-BASE_SIZE=465
+BASE_SIZE=50
 UTIL=50 # in %
 THREADS=16
 MAX_VICTIM_SEARCH=4096
 IOF=300 #IOSIZE FACTOR in percent # IO_SIZE/BASE_SIZE
-#IOF=120 #IOSIZE FACTOR in percent # IO_SIZE/BASE_SIZE
+#IOF=135 #IOSIZE FACTOR in percent # IO_SIZE/BASE_SIZE
 ####
 SIZE=$((${BASE_SIZE}*1024)) # in MB
 
@@ -151,41 +152,6 @@ function f2fs_exit {
   fi
 }
 
-function calc_file_size {
-  echo $((${SIZE}*${UTIL}/100/${THREADS}))
-} 
-
-function fio_warmup {
-fio --name=fio --directory=${FS_DIR} --rw=write --bs=128K \
-  --size=${FILE_SIZE}M --numjobs=${THREADS} --group_reporting
-}
-
-function fio_run_zipf {
-  (
-  fio --name=fio --directory=${FS_DIR} --rw=randwrite --bs=4K \
-    --norandommap --numjobs=${THREADS} --random_distribution=zipf:${THETA} \
-    --filesize=${FILE_SIZE}M --io_size=$((${SIZE}*${IOF}/100/${THREADS}))M \
-    --group_reporting \
-    --output=${PREFIX}test_part${BASE_SIZE}G_${MODE}_util${UTIL}_S4_${S4_ENABLE}_zipf${THETA}_${MAX_VICTIM_SEARCH}segs_${DATE}.txt \
-    --eta=always --eta-newline=500msec 
-    ) | tee ${PREFIX}eta_part${BASE_SIZE}G_${MODE}_util${UTIL}_S4_${S4_ENABLE}_zipf${THETA}_${MAX_VICTIM_SEARCH}segs_${DATE}.txt
-}
-    #--filesize=${FILE_SIZE}M --io_size=$((${SIZE}*${IOF}/100/${THREADS}-${FILE_SIZE}))M \
-    #--norandommap --numjobs=${THREADS} --random_distribution=zipf:${THETA} \
-    #--filesize=${FILE_SIZE}M --io_size=$((40960-${FILE_SIZE}))M \
-    #--norandommap --numjobs=${THREADS} --random_distribution=zipf:${THETA} \
-
-function fio_run_uniform {
-  (
-  fio --name=fio --directory=${FS_DIR} --rw=randwrite --bs=4K \
-    --norandommap --numjobs=${THREADS} \
-    --filesize=${FILE_SIZE}M --io_size=$((${SIZE}*${IOF}/100/${THREADS}))M \
-    --group_reporting \
-    --output=${PREFIX}test_part${BASE_SIZE}G_${MODE}_util${UTIL}_S4_${S4_ENABLE}_uniform_${MAX_VICTIM_SEARCH}segs_${DATE}.txt \
-    --eta=always --eta-newline=500msec 
-    ) | tee ${PREFIX}eta_part${BASE_SIZE}G_${MODE}_util${UTIL}_S4_${S4_ENABLE}_uniform_${MAX_VICTIM_SEARCH}segs_${DATE}.txt
-}
-
 function trace_off {
   echo 0 > /sys/kernel/tracing/events/nvme/nvme_setup_cmd/enable
   echo 0 > /sys/kernel/tracing/events/nvme/nvme_complete_rq/enable
@@ -232,23 +198,14 @@ function trace_on {
   DSTAT_PID=$?
 }
 
-function debugfs_trace_on {
-rm ${RESULT}.status
-while true; do
-    cat /sys/kernel/debug/f2fs/status >> ${RESULT}.status
-    # Wait for 10 seconds
-    sleep 10
-done &
-DEBUGFS_TRACE_PID=$!
-echo $DEBUGFS_TRACE_PID
+FIU_FILE=ug-filesrv/ug_filesrv_concat.txt
+function run_fiu {
+  time ./fiu_replayer ${FIU_FILE} ${FS_DIR} &> fiu_time_${RESULT}.txt
 }
-
-function debugfs_trace_off {
-  cat /sys/kernel/debug/f2fs/status >> ${RESULT}.status
-  kill $DEBUGFS_TRACE_PID
+function run_fiu_timeout {
+  timeout 90 ./fiu_replayer ${FIU_FILE} ${FS_DIR} > fiu_time_${RESULT}.txt
 }
-
-#PID=435531
+#PID=108322
 #WAIT_TIME=600
 #while kill -0 $PID 2>/dev/null; do
 #  echo waiting...
@@ -265,62 +222,53 @@ trace_off
 #for MAX_VICTIM_SEARCH in 1 4 16 64 256 1024 4096 16384 65536 262144
 
 
-PREFIX=F2FS_ANALYSIS_
 #PREFIX=ENTROPY_V3_NODE_
-#for THETA in 0.5 0.25 "RANDOM"
-#for BUCKET in 1 16 64
-#do
-for THETA in 0.25
+for ITER in D
 do
-for S4_ENABLE in 0
+for MAX_VICTIM_SEARCH in "S4"
 do
-for MAX_VICTIM_SEARCH in 16 1024
-do
+echo 
 echo ${MAX_VICTIM_SEARCH} segs
+
 f2fs_exit
 
 echo 3 > /proc/sys/vm/drop_caches
 nvme format /dev/${DEV_NAME} --force -s 1
 sleep 3
 
-#S4_MODULE=/home/ihhwang/gc_scanning/F2FS_S4/linux-6.6.52/fs/f2fs/f2fs_entropy_v4_b${BUCKET}.ko
-#PREFIX=BUCKET${BUCKET}_
-PREFIX=F2FS_300_
-#PREFIX=ENTROPY_V4_
+#PREFIX=ENTROPY_V2_
 
-RESULT=${PREFIX}_${MAX_VICTIM_SEARCH}segs_${UTIL}_${THETA}_S4_${S4_ENABLE}_${DATE}
-f2fs_init
-
+if [ "$MAX_VICTIM_SEARCH" = "S4" ]; then
+  S4_ENABLE=1
+  f2fs_init
+  error_exit
+  MAX_VICTIM_SEARCH=4096
+  PREFIX=ENTROPY_V4_
+else
+  S4_ENABLE=0
+  f2fs_init
+  error_exit
+  PREFIX=F2FS_
+fi
+PREFIX=${PREFIX}${ITER}_
+RESULT=REAL_${PREFIX}_${MAX_VICTIM_SEARCH}segs_S4_${S4_ENABLE}_${DATE}
 echo ${MAX_VICTIM_SEARCH} > /sys/fs/f2fs/${DEV_TARGET}/max_victim_search #default 4096
 error_exit
 
-FILE_SIZE=$(calc_file_size)
 sleep 3
 
-trace_off
-trace_on
+#trace_off
+#trace_on
 
 #fio_warmup
 #error_exit
-
-
-debugfs_trace_on
-
-#uniform random distribution
-if [ "$THETA" == "RANDOM" ]; then
-#if [ $THETA -eq -1 ]; then
-fio_run_uniform
-#zipfian distribution of theta $THETA
-else
-fio_run_zipf
-fi
-trace_off
-debugfs_trace_off
-#fio_run_zipf_nowarm
+#echo "timeout 90 sec"
+#run_fiu_timeout > ${RESULT}_iterstatus.txt
+run_fiu > ${RESULT}_iterstatus.txt
 error_exit
+cat /sys/kernel/debug/f2fs/status > ${RESULT}.status
+
 #pkill  cat
 done
 done
-done
-#done
 trace_off
